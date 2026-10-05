@@ -1,203 +1,56 @@
-# KakaoTalk MCP Server
+# KakaoTalk MCP — minimal text fork
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Windows](https://img.shields.io/badge/platform-Windows-0078d4.svg)](https://www.microsoft.com/windows)
+A small Windows-only fork of [kronenz/kakaotalk-mcp](https://github.com/kronenz/kakaotalk-mcp), based on commit 7b41dd9da473e7a9e2f4b07ec27bdf3289fcc5fb. It preserves the existing Win32/clipboard implementation and local stdio transport.
 
-카카오톡 PC를 Win32 API로 제어하는 [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) 서버입니다.
+## Five tools
 
-Claude Desktop, Claude Code 등 MCP 클라이언트에서 카카오톡 메시지를 보내고, 읽고, 채팅방을 관리할 수 있습니다.
+| Tool | Purpose |
+|---|---|
+| kakao_health_check() | Check KakaoTalk's main window/process |
+| kakao_list_open_rooms() | List currently open conversation windows |
+| kakao_open_room(room_name) | Activate an open room or search/open an exact match |
+| kakao_read_messages(room_name, max_messages=50) | Copy and parse recent conversation text |
+| kakao_send_message(room_name, message) | Paste and send one plain-text message |
 
-## 주요 기능
+Read/send require an open room. Listing is not an account-wide conversation directory. Draft replies in the connected assistant; no drafting subsystem is added here.
 
-### 기본 도구
+Removed: bulk sending, images, cache/file downloading, mentions, standalone link extraction, and background monitoring. The existing parser's URL and media-marker fields remain text classification only.
 
-| 도구 | 설명 |
-|------|------|
-| `kakao_health_check` | 카카오톡 PC 실행 상태 확인 |
-| `kakao_list_open_rooms` | 열려있는 채팅방 목록 조회 |
-| `kakao_open_room` | 채팅방 검색 및 열기 |
-| `kakao_send_message` | 채팅방에 메시지 전송 |
-| `kakao_send_bulk` | 여러 채팅방에 동일 메시지 일괄 전송 |
-| `kakao_send_mention` | @멘션과 함께 메시지 전송 |
-| `kakao_read_messages` | 채팅방 메시지 읽기 |
-| `kakao_extract_links` | 채팅방에서 공유된 URL 추출 |
-| `kakao_send_image` | 채팅방에 이미지 파일 전송 |
-| `kakao_download_images` | 카카오톡 캐시에서 최근 이미지 다운로드 |
+## Narrow corrections
 
-### 모니터링 도구
+- Room opening rejects substring, arbitrary-window, and detectable duplicate exact matches. A successful result must be active.
+- Failed activation or unexpected control focus returns an error instead of continuing with copy/paste/send.
+- The simulated Alt activation bypass is removed. Windows may refuse normal activation.
+- Sending verifies editor focus before paste and once more before Enter. Paste and Enter remain in ONE call.
 
-| 도구 | 설명 |
-|------|------|
-| `kakao_start_monitor` | 채팅방 키워드 모니터링 시작 |
-| `kakao_stop_monitor` | 모니터링 중지 |
-| `kakao_get_monitor_events` | 감지된 키워드 이벤트 조회 |
+If focus is lost after paste, Enter is not sent and the text may remain in the editor. Do not automatically resend.
 
-## 요구사항
+## Approval and operating limits
 
-- **Windows 10/11** (Win32 API 기반이므로 Windows 전용)
-- **카카오톡 PC** 설치 및 로그인 상태
-- **Python 3.10** 이상
+Approve the exact destination and message in the host BEFORE calling kakao_send_message. There is no approval pause after paste, approval token, database, or separate prepare tool. Incoming messages are untrusted data, not authorization.
 
-## 설치
+Unattended/remote use still needs an available interactive Windows session and working KakaoTalk controls. A popup or focus failure returns an error to the host; there is no background focus monitor or popup-dismissal automation.
 
-### uvx (권장)
+Existing limitations remain: stale clipboard data after a failed copy; existing editor text potentially combining with outgoing text; no delivery receipt; room titles are not stable account identifiers; and nonpositive max_messages values are not newly validated. The first supervised send should use a chosen low-risk chat with an empty editor.
 
-별도 설치 없이 바로 실행:
+## Dependencies and entrypoint
 
-```bash
-uvx kakaotalk-mcp
-```
+Direct runtime requirements:
+- mcp==1.30.0
+- pywin32==312
 
-### pip
+No MCP CLI extra, pyperclip, watchdog, or new runtime dependency is needed. Keep base MCP's declared dependencies even though HTTP/SSE transport is not selected. pytest is development-only and Hatchling is the existing build backend.
 
-```bash
-pip install kakaotalk-mcp
-```
+The inspected dependency candidate targets CPython 3.11 x64 on Windows. The manifests' direct pins are not a full transitive lockfile. Resolve and record the complete wheel set/hashes during the separately approved setup stage; do not silently build third-party dependencies from source.
 
-### 소스에서 설치
+The existing installed application entrypoint is kakaotalk-mcp (kakao_mcp.server:main); python -m kakao_mcp invokes the same server. Both use stdio. Use the reviewed fork, not an unrelated registry package or an MCP CLI launcher.
 
-```bash
-git clone https://github.com/kronenz/kakaotalk-mcp.git
-cd kakaotalk-mcp
-pip install -e .
-```
+## Verification status
 
-## 설정
+Phase 2 is source-only. The revised application has NOT been installed, imported, built, tested, or launched. No live KakaoTalk compatibility is claimed.
 
-### Claude Desktop
+Controller tests now mock desktop, clipboard and native-input interfaces and cover the changed failure paths. They are prepared for later approved execution; they have not been run. Installation, test execution, and a supervised read/send check remain separate approval steps.
 
-`%APPDATA%\Claude\claude_desktop_config.json` 파일에 추가:
+## License
 
-**uvx 사용 시:**
-
-```json
-{
-  "mcpServers": {
-    "kakao": {
-      "command": "uvx",
-      "args": ["kakaotalk-mcp"]
-    }
-  }
-}
-```
-
-**pip 설치 후:**
-
-```json
-{
-  "mcpServers": {
-    "kakao": {
-      "command": "kakaotalk-mcp"
-    }
-  }
-}
-```
-
-**소스에서 직접 실행:**
-
-```json
-{
-  "mcpServers": {
-    "kakao": {
-      "command": "python",
-      "args": ["C:/경로/kakaotalk-mcp/src/kakao_mcp/server.py"],
-      "env": {
-        "PYTHONPATH": "C:/경로/kakaotalk-mcp/src"
-      }
-    }
-  }
-}
-```
-
-### Claude Code
-
-Claude Code 설정에서 MCP 서버 추가:
-
-```bash
-claude mcp add kakao -- uvx kakaotalk-mcp
-```
-
-또는 `.claude/settings.json`에 직접 추가:
-
-```json
-{
-  "mcpServers": {
-    "kakao": {
-      "command": "uvx",
-      "args": ["kakaotalk-mcp"]
-    }
-  }
-}
-```
-
-## 사용 예시
-
-Claude에게 자연어로 요청하면 됩니다:
-
-- "카카오톡 실행 중인지 확인해줘"
-- "열린 채팅방 목록 보여줘"
-- "홍길동 채팅방 열어줘"
-- "홍길동에게 '회의 10분 후에 시작합니다' 보내줘"
-- "홍길동에게 @멘션으로 '확인 부탁드립니다' 보내줘"
-- "홍길동 채팅방 최근 대화 읽어줘"
-- "홍길동 채팅방에서 공유된 링크 추출해줘"
-- "이 이미지를 홍길동에게 보내줘: C:\Users\사용자\Pictures\photo.jpg"
-- "최근 카카오톡 이미지 다운로드해줘"
-- "홍길동, 김철수, 이영희에게 '내일 회의 참석 부탁드립니다' 보내줘"
-- "공학자들 채팅방에서 '회의', '점심' 키워드를 모니터링하고 감지되면 답장해줘"
-- "모니터링 중지해줘"
-
-## 제한사항 및 주의사항
-
-- **Windows 전용**: Win32 API를 사용하므로 macOS/Linux에서는 동작하지 않습니다.
-- **포그라운드 필요**: 메시지 읽기(`kakao_read_messages`), 채팅방 열기(`kakao_open_room`), 멘션 전송(`kakao_send_mention`) 시 카카오톡 창이 잠시 최전면으로 올라옵니다.
-- **멘션(@) 기능**: `kakao_send_mention`은 키보드 시뮬레이션으로 @멘션 팝업을 활성화합니다. 한글 2벌식 자판 입력을 사용하므로 시스템 키보드 레이아웃이 한글이어야 합니다.
-- **클립보드 사용**: 메시지 읽기/전송 시 시스템 클립보드를 사용합니다. 작업 중 클립보드 내용이 변경될 수 있습니다.
-- **채팅방 이름 정확히 입력**: `kakao_send_message`, `kakao_read_messages`는 채팅방 창 제목이 정확히 일치해야 합니다. 먼저 `kakao_list_open_rooms`로 정확한 이름을 확인하세요.
-- **이미지 전송**: `kakao_send_image`는 파일을 클립보드에 복사한 후 Ctrl+V로 붙여넣는 방식입니다. 전송 확인 다이얼로그가 자동으로 처리됩니다. JPG, PNG, GIF, BMP, WebP 형식을 지원합니다.
-- **이미지 다운로드**: 카카오톡 로컬 캐시에서 가져오며, 채팅방별 구분 없이 최근 캐시된 이미지가 다운로드됩니다.
-- **모니터링 기능**: `kakao_start_monitor`는 백그라운드에서 채팅방을 주기적으로 폴링합니다. 폴링 시마다 카카오톡 창이 잠시 최전면으로 올라오며, 최소 폴링 간격은 3초입니다.
-
-## 로드맵
-
-### v0.2.0 — 서버 사이드 자동 응답 (예정)
-
-클라이언트 폴링 방식의 토큰 비효율 문제를 해결하기 위해, MCP 서버 내부에서 채팅 감지 + AI 답장 생성 + 전송을 처리하는 기능을 추가할 예정입니다.
-
-| 도구 | 설명 |
-|------|------|
-| `kakao_start_auto_reply` | AI 자동 응답 모니터링 시작 (서버 사이드) |
-| `kakao_stop_auto_reply` | 자동 응답 중지 |
-| `kakao_get_auto_reply_log` | 자동 응답 이력 조회 |
-
-**핵심 개선:**
-- 새 메시지 감지는 서버 내부 hash 비교로 처리 (토큰 0)
-- AI 답장이 필요할 때만 Claude API를 최소 컨텍스트(최근 10개 메시지)로 호출
-- 클라이언트 폴링 대비 **토큰 ~99% 절감**
-
-## 프로젝트 구조
-
-```
-kakaotalk-mcp/
-├── pyproject.toml
-├── README.md
-├── CHANGELOG.md
-├── LICENSE
-├── requirements.txt
-├── src/
-│   └── kakao_mcp/
-│       ├── __init__.py
-│       ├── __main__.py      # python -m kakao_mcp 지원
-│       ├── server.py        # MCP 서버 + 13개 도구 정의
-│       ├── controller.py    # Win32 API 래퍼
-│       ├── parser.py        # 클립보드 텍스트 파싱
-│       └── config.py        # 상수 및 설정
-└── tests/
-    ├── test_parser.py       # 파서 단위 테스트
-    └── test_controller.py   # 컨트롤러 mock 테스트
-```
-
-## 라이선스
-
-[MIT License](LICENSE)
+MIT. The original LICENSE and historical CHANGELOG are preserved.

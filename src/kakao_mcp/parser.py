@@ -103,20 +103,3 @@ def _finalize_message(msg: Dict, messages_list: List[Dict]):
     msg["is_file"] = text.startswith("파일:")
     msg["urls"] = URL_PATTERN.findall(msg["text"])
     messages_list.append(msg)
-
-
-def extract_urls_from_messages(messages: List[Dict]) -> List[Dict]:
-    """Extract all URLs from parsed messages.
-
-    Returns:
-        List of dicts with url, sender, time.
-    """
-    urls = []
-    for msg in messages:
-        for url in msg.get("urls", []):
-            urls.append({
-                "url": url,
-                "sender": msg["sender"],
-                "time": msg["time"],
-            })
-    return urls

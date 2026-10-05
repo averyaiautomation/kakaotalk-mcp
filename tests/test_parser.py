@@ -1,11 +1,10 @@
 """Unit tests for kakao_mcp.parser — no Win32 dependency needed."""
 import sys
 import os
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from kakao_mcp.parser import parse_chat_text, extract_urls_from_messages
+from kakao_mcp.parser import parse_chat_text
 
 
 SAMPLE_CLIPBOARD = """\
@@ -53,14 +52,6 @@ def test_multiline_message():
     # Message at index 1 has a continuation line with the URL
     assert "https://example.com" in result["messages"][1]["text"]
     assert "이거 보세요" in result["messages"][1]["text"]
-
-
-def test_extract_urls():
-    result = parse_chat_text(SAMPLE_CLIPBOARD)
-    urls = extract_urls_from_messages(result["messages"])
-    assert len(urls) == 1
-    assert urls[0]["url"] == "https://example.com"
-    assert urls[0]["sender"] == "이영희"
 
 
 def test_date_separator():

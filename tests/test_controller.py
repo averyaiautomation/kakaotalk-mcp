@@ -2,11 +2,26 @@
 import sys
 import os
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from kakao_mcp import controller, config
+
+
+@pytest.fixture(autouse=True)
+def desktop():
+    """No controller test may reach real desktop, clipboard or input APIs."""
+    with (
+        patch.object(controller, "_user32") as user32,
+        patch.object(controller, "win32gui") as gui,
+        patch.object(controller, "win32api") as api,
+        patch.object(controller, "win32process") as process,
+        patch.object(controller, "win32clipboard") as clipboard,
+        patch.object(controller.time, "sleep"),
+    ):
+        yield {"user32": user32, "gui": gui, "api": api,
+               "process": process, "clipboard": clipboard}
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +122,9 @@ def test_list_chat_windows(mock_gui):
 def test_send_message_success(mock_find, mock_child, mock_api):
     mock_find.return_value = 11111
     mock_child.return_value = 22222
-    result = controller.send_message_to_room("TestRoom", "Hello")
+    with patch.object(controller, "_ensure_foreground", return_value=True), \
+            patch.object(controller, "_verify_expected_focus", return_value=True):
+        result = controller.send_message_to_room("TestRoom", "Hello")
     assert result["success"] is True
     assert "sent" in result["message"].lower()
 
@@ -145,7 +162,9 @@ def test_read_messages_success(mock_find, mock_child, mock_gui, mock_user32, moc
     mock_child.return_value = 33333
     mock_gui.GetWindowRect.return_value = (0, 0, 100, 100)
     mock_clip.return_value = "[Room] [대화상대 2명]\n[A] [오전 10:00] Hello"
-    result = controller.read_chat_messages("Room")
+    with patch.object(controller, "_ensure_foreground", return_value=True), \
+            patch.object(controller, "_verify_expected_focus", return_value=True):
+        result = controller.read_chat_messages("Room")
     assert result["success"] is True
     assert "Hello" in result["raw_text"]
 
@@ -157,115 +176,153 @@ def test_read_messages_room_not_found(mock_find):
     assert result["success"] is False
 
 
-# ---------------------------------------------------------------------------
-# get_kakao_user_hash_dir
-# ---------------------------------------------------------------------------
-
-@patch("os.listdir")
-@patch("os.path.isdir")
-def test_get_user_hash_dir_found(mock_isdir, mock_listdir):
-    mock_isdir.return_value = True
-    mock_listdir.return_value = ["a" * 40, "not_a_hash"]
-
-    # Make only the 40-char entry look like a directory
-    def isdir_side(path):
-        return True
-
-    mock_isdir.side_effect = isdir_side
-    result = controller.get_kakao_user_hash_dir()
-    assert result is not None
-    assert "a" * 40 in result
+def test_duplicate_exact_titles_raise_instead_of_selecting_first(desktop):
+    gui = desktop["gui"]
+    gui.IsWindowVisible.return_value = True
+    gui.GetClassName.return_value = config.KAKAO_CHAT_WINDOW_CLASS
+    gui.GetWindowText.return_value = "Room"
+    gui.EnumWindows.side_effect = lambda callback, _: [
+        callback(100, None), callback(200, None)
+    ]
+    with pytest.raises(ValueError, match="Multiple open chat windows"):
+        controller.find_chat_window("Room")
 
 
-@patch("os.path.isdir")
-def test_get_user_hash_dir_no_users_dir(mock_isdir):
-    mock_isdir.return_value = False
-    result = controller.get_kakao_user_hash_dir()
-    assert result is None
+def test_focus_query_checks_the_other_gui_thread(desktop):
+    desktop["user32"].GetForegroundWindow.return_value = 100
+    desktop["gui"].IsChild.return_value = True
+    desktop["process"].GetWindowThreadProcessId.return_value = (7, 99)
+
+    def fill_focus(thread_id, info_pointer):
+        assert thread_id == 7
+        info = info_pointer._obj
+        assert info.cbSize == controller.ctypes.sizeof(controller._GUITHREADINFO)
+        info.hwndActive = 100
+        info.hwndFocus = 101
+        return 1
+
+    desktop["user32"].GetGUIThreadInfo.side_effect = fill_focus
+    assert controller._verify_expected_focus(100, 101) is True
+    assert controller._verify_expected_focus(100, 102) is False
+    desktop["user32"].keybd_event.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# _copy_image_to_clipboard
-# ---------------------------------------------------------------------------
-
-@patch("kakao_mcp.controller.win32clipboard")
-@patch("kakao_mcp.controller.subprocess")
-@patch("os.path.isfile", return_value=True)
-@patch("os.path.abspath", return_value="C:\\test\\image.jpg")
-def test_copy_image_to_clipboard_success(mock_abs, mock_isfile, mock_subprocess,
-                                          mock_clipboard):
-    # Fake BMP data: 14-byte file header + 40-byte info header + pixel data
-    fake_bmp = b"BM" + b"\x00" * 12 + b"\x00" * 40 + b"\xff" * 100
-    mock_result = mock_subprocess.run.return_value
-    mock_result.returncode = 0
-    mock_result.stdout = fake_bmp
-    controller._copy_image_to_clipboard("C:\\test\\image.jpg")
-    mock_subprocess.run.assert_called_once()
-    call_args = mock_subprocess.run.call_args[0][0]
-    assert call_args[0] == "powershell"
-    mock_clipboard.OpenClipboard.assert_called_once()
-    mock_clipboard.EmptyClipboard.assert_called_once()
-    mock_clipboard.SetClipboardData.assert_called_once()
+def test_focus_query_failure_aborts(desktop):
+    desktop["user32"].GetForegroundWindow.return_value = 100
+    desktop["gui"].IsChild.return_value = True
+    desktop["process"].GetWindowThreadProcessId.return_value = (7, 99)
+    desktop["user32"].GetGUIThreadInfo.return_value = 0
+    assert controller._verify_expected_focus(100, 101) is False
 
 
-@patch("os.path.isfile", return_value=False)
-@patch("os.path.abspath", return_value="C:\\nonexistent.jpg")
-def test_copy_image_to_clipboard_not_found(mock_abs, mock_isfile):
-    with pytest.raises(FileNotFoundError):
-        controller._copy_image_to_clipboard("C:\\nonexistent.jpg")
+def test_activation_does_not_inject_alt(desktop):
+    desktop["user32"].GetForegroundWindow.return_value = 999
+    assert controller._ensure_foreground(100) is False
+    desktop["user32"].SetForegroundWindow.assert_called_once_with(100)
+    desktop["user32"].keybd_event.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# send_image_to_room
-# ---------------------------------------------------------------------------
-
-@patch("kakao_mcp.controller._copy_image_to_clipboard")
-@patch("kakao_mcp.controller.win32gui")
-@patch("kakao_mcp.controller._user32")
-@patch("kakao_mcp.controller._send_ctrl_key_combo")
-@patch("kakao_mcp.controller.bring_window_to_front")
-@patch("kakao_mcp.controller.find_child_window_recursive")
-@patch("kakao_mcp.controller.find_chat_window")
-@patch("os.path.splitext", return_value=("C:\\test\\image", ".jpg"))
-@patch("os.path.isfile", return_value=True)
-@patch("os.path.abspath", return_value="C:\\test\\image.jpg")
-def test_send_image_success(mock_abs, mock_isfile, mock_split, mock_find,
-                            mock_find_child, mock_bring, mock_ctrl,
-                            mock_user32, mock_win32gui, mock_copy):
-    mock_find.return_value = 11111
-    mock_find_child.return_value = 22222
-    mock_win32gui.GetWindowRect.return_value = (100, 100, 200, 120)
-    # Simulate dialog appearing (foreground changes to a different window)
-    mock_user32.GetForegroundWindow.side_effect = [11111, 33333]
-    result = controller.send_image_to_room("TestRoom", "C:\\test\\image.jpg")
-    assert result["success"] is True
-    assert "sent" in result["message"].lower()
-    mock_copy.assert_called_once()
-    mock_bring.assert_called_once()
-
-
-@patch("os.path.isfile", return_value=False)
-@patch("os.path.abspath", return_value="C:\\nonexistent.jpg")
-def test_send_image_file_not_found(mock_abs, mock_isfile):
-    result = controller.send_image_to_room("TestRoom", "C:\\nonexistent.jpg")
+def test_send_failed_activation_has_no_clipboard_or_input(desktop):
+    with patch.object(controller, "find_chat_window", return_value=100), \
+            patch.object(controller, "find_child_window_recursive", return_value=101), \
+            patch.object(controller, "_ensure_foreground", return_value=False):
+        result = controller.send_message_to_room("Room", "Hello")
     assert result["success"] is False
-    assert "not found" in result["error"]
+    desktop["clipboard"].OpenClipboard.assert_not_called()
+    desktop["user32"].mouse_event.assert_not_called()
+    desktop["user32"].keybd_event.assert_not_called()
 
 
-@patch("os.path.splitext", return_value=("C:\\test\\doc", ".pdf"))
-@patch("os.path.isfile", return_value=True)
-@patch("os.path.abspath", return_value="C:\\test\\doc.pdf")
-def test_send_image_unsupported_format(mock_abs, mock_isfile, mock_split):
-    result = controller.send_image_to_room("TestRoom", "C:\\test\\doc.pdf")
+def test_send_wrong_editor_focus_does_not_paste(desktop):
+    desktop["gui"].GetWindowRect.return_value = (0, 0, 100, 100)
+    with patch.object(controller, "find_chat_window", return_value=100), \
+            patch.object(controller, "find_child_window_recursive", return_value=101), \
+            patch.object(controller, "_ensure_foreground", return_value=True), \
+            patch.object(controller, "_verify_expected_focus", return_value=False):
+        result = controller.send_message_to_room("Room", "Hello")
     assert result["success"] is False
-    assert "unsupported" in result["error"].lower()
+    desktop["clipboard"].OpenClipboard.assert_not_called()
+    desktop["user32"].keybd_event.assert_not_called()
 
 
-@patch("os.path.splitext", return_value=("C:\\test\\image", ".jpg"))
-@patch("os.path.isfile", return_value=True)
-@patch("os.path.abspath", return_value="C:\\test\\image.jpg")
-@patch("kakao_mcp.controller.find_chat_window", return_value=None)
-def test_send_image_room_not_found(mock_find, mock_abs, mock_isfile, mock_split):
-    result = controller.send_image_to_room("NoRoom", "C:\\test\\image.jpg")
+def test_send_focus_lost_after_paste_never_presses_enter(desktop):
+    desktop["gui"].GetWindowRect.return_value = (0, 0, 100, 100)
+    with patch.object(controller, "find_chat_window", return_value=100), \
+            patch.object(controller, "find_child_window_recursive", return_value=101), \
+            patch.object(controller, "_ensure_foreground", return_value=True), \
+            patch.object(controller, "_verify_expected_focus", side_effect=[True, False]), \
+            patch.object(controller, "_send_ctrl_key_combo") as combo:
+        result = controller.send_message_to_room("Room", "Hello")
     assert result["success"] is False
-    assert "not found" in result["error"]
+    assert "Enter was not sent" in result["error"]
+    desktop["clipboard"].SetClipboardText.assert_called_once_with(
+        "Hello", controller.win32clipboard.CF_UNICODETEXT
+    )
+    combo.assert_called_once_with(0x56)
+    desktop["user32"].keybd_event.assert_not_called()
+
+
+def test_read_wrong_control_focus_never_copies(desktop):
+    desktop["gui"].GetWindowRect.return_value = (0, 0, 100, 100)
+    with patch.object(controller, "find_chat_window", return_value=100), \
+            patch.object(controller, "find_child_window_recursive", return_value=101), \
+            patch.object(controller, "_ensure_foreground", return_value=True), \
+            patch.object(controller, "_verify_expected_focus", return_value=False):
+        result = controller.read_chat_messages("Room")
+    assert result["success"] is False
+    desktop["user32"].keybd_event.assert_not_called()
+    desktop["clipboard"].OpenClipboard.assert_not_called()
+
+
+@pytest.mark.parametrize("rooms", [
+    [],
+    [{"title": "Other", "hwnd": 200}],
+    [{"title": "Room extra", "hwnd": 200}],
+    [{"title": "Room", "hwnd": 200}, {"title": "Room", "hwnd": 201}],
+])
+def test_search_rejects_missing_partial_and_ambiguous_matches(desktop, rooms):
+    with patch.object(controller, "_ensure_foreground", return_value=True), \
+            patch.object(controller, "_activate_search_and_get_edit", return_value=101), \
+            patch.object(controller, "_verify_expected_focus", return_value=True), \
+            patch.object(controller, "list_chat_windows", return_value=rooms):
+        result = controller.search_and_open_room("Room")
+    assert result["success"] is False
+
+
+@pytest.mark.parametrize("active", [True, False])
+def test_search_exact_match_must_be_active(desktop, active):
+    with patch.object(controller, "_ensure_foreground", return_value=True), \
+            patch.object(controller, "_activate_search_and_get_edit", return_value=101), \
+            patch.object(controller, "_verify_expected_focus", side_effect=[True, True, active]), \
+            patch.object(controller, "list_chat_windows", return_value=[{"title": "Room", "hwnd": 200}]):
+        result = controller.search_and_open_room("Room")
+    assert result["success"] is active
+
+
+def test_search_activation_failure_never_sends_input(desktop):
+    with patch.object(controller, "_ensure_foreground", return_value=False):
+        result = controller.search_and_open_room("Room")
+    assert result["success"] is False
+    desktop["api"].SendMessage.assert_not_called()
+    desktop["user32"].keybd_event.assert_not_called()
+
+
+def test_open_existing_room_activation_failure_is_an_error(desktop):
+    from kakao_mcp.server import kakao_open_room
+
+    with patch.object(controller, "find_chat_window", return_value=100), \
+            patch.object(controller, "_ensure_foreground", return_value=False), \
+            patch.object(controller, "search_and_open_room") as search:
+        result = kakao_open_room("Room")
+    assert "error" in result
+    search.assert_not_called()
+
+
+def test_open_ambiguous_room_does_not_fall_back_to_search(desktop):
+    from kakao_mcp.server import kakao_open_room
+
+    with patch.object(controller, "find_chat_window", side_effect=ValueError("Ambiguous room")), \
+            patch.object(controller, "search_and_open_room") as search:
+        result = kakao_open_room("Room")
+    assert "error" in result
+    search.assert_not_called()
